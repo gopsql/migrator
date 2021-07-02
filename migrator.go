@@ -180,6 +180,17 @@ func (m *Migrator) SetMigrations(migrations interface{}) error {
 	return nil
 }
 
+func (m *Migrator) Versions() (migrated, unmigrated []int) {
+	for _, migration := range m.migrations {
+		if m.versionExists(migration.version) {
+			migrated = append(migrated, migration.version)
+		} else {
+			unmigrated = append(unmigrated, migration.version)
+		}
+	}
+	return
+}
+
 func (m *Migrator) Migrate() (err error) {
 	if len(m.migrations) == 0 {
 		m.Logger.Info("nothing to migrate")
@@ -258,7 +269,7 @@ func (m *Migrator) versionExists(version int) bool {
 	scope := m.CanonicalScope()
 	var one int
 	err := m.DB.QueryRow("SELECT 1 AS one FROM schema_migrations WHERE scope = $1 AND version = $2 LIMIT 1", scope, strconv.Itoa(version)).Scan(&one)
-	if err != nil {
+	if err != nil && err != m.DB.ErrNoRows() {
 		m.Logger.Debug("check version:", err)
 	}
 	return one == 1
