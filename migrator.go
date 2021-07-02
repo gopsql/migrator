@@ -14,7 +14,6 @@ import (
 
 	"github.com/gopsql/db"
 	"github.com/gopsql/logger"
-	"github.com/gopsql/psql"
 )
 
 const (
@@ -74,6 +73,12 @@ type (
 		up      string
 		down    string
 	}
+
+	psqlModel interface {
+		TableName() string
+		Schema() string
+		DropSchema() string
+	}
 )
 
 func CreateNewMigration(dir string, names ...string) (path string, err error) {
@@ -90,10 +95,9 @@ func CreateNewMigration(dir string, names ...string) (path string, err error) {
 	return createNewMigration(dir, name, "\n", "\n")
 }
 
-func CreateNewMigrationFromModels(dir string, models ...interface{}) (path string, err error) {
+func CreateNewMigrationFromModels(dir string, models ...psqlModel) (path string, err error) {
 	var name, up, down string
-	for _, o := range models {
-		model := psql.NewModel(o)
+	for _, model := range models {
 		if name == "" {
 			name = "create_" + model.TableName()
 		}
