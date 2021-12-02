@@ -1,12 +1,8 @@
 package migrator
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"os"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -68,94 +64,195 @@ type (
 		migrations []migration
 	}
 
+	Migrations []Migration
+
+	Migration struct {
+		Version int
+		Name    string
+		Up      string
+		Down    string
+	}
+
+	PsqlModel interface {
+		Columns() []string
+		ColumnDataTypes() map[string]string
+		TableName() string
+		Schema() string
+		DropSchema() string
+	}
+
 	migration struct {
 		version int
 		up      string
 		down    string
 	}
-
-	psqlModel interface {
-		TableName() string
-		Schema() string
-		DropSchema() string
-	}
 )
 
-func CreateNewMigration(dir string, names ...string) (path string, err error) {
-	var name string
-	if len(names) > 0 {
-		name = names[0]
+func NewMigrator(optionalScope ...string) *Migrator {
+	var scope string
+	if len(optionalScope) > 0 {
+		scope = optionalScope[0]
 	}
-	for name == "" {
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print("File name in lower snake case (for example: create_table_name): ")
-		name, _ = reader.ReadString('\n')
-		name = strings.TrimSpace(name)
+	return &Migrator{
+		Scope: scope,
 	}
-	return createNewMigration(dir, name, "\n", "\n")
 }
 
-func CreateNewMigrationFromModels(dir string, models ...psqlModel) (path string, err error) {
+func (m *Migrator) SetConnection(dbConn db.DB) {
+	m.DB = dbConn
+}
+
+func (m *Migrator) SetLogger(logger logger.Logger) {
+	m.Logger = logger
+}
+
+// NewMigration generates migration file based on the differences between
+// schemas in the database and psql models.
+func (m *Migrator) NewMigration(models ...PsqlModel) (Migrations, error) {
+	tableNames, err := m.getTableNames()
+	if err != nil {
+		return nil, err
+	}
+
+	columns, err := m.getColumns()
+	if err != nil {
+		return nil, err
+	}
+
+	var tablesCreated []string
+	var columnsCreated []string
+	var tablesDropped []string
+	var columnsDropped []string
 	var name, up, down string
+
+	// find new tables
 	for _, model := range models {
-		if name == "" {
-			name = "create_" + model.TableName()
+		tableName := model.TableName()
+		if tableNames.has(tableName) {
+			continue
 		}
 		up += "\n" + model.Schema()
 		down = "\n" + model.DropSchema() + down
+		tablesCreated = append(tablesCreated, tableName)
 	}
-	return createNewMigration(dir, name, up, down)
-}
 
-func createNewMigration(dir, name, up, down string) (path string, err error) {
-	var f *os.File
-	f, err = os.Open(dir)
-	if os.IsNotExist(err) {
-		err = os.MkdirAll(dir, 0755)
-		if err != nil {
-			return
-		}
-		err = ioutil.WriteFile(filepath.Join(dir, "migrations.go"), []byte(migrationsTemplate), 0644)
-		if err != nil {
-			return
-		}
-		f, err = os.Open(dir)
-	}
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	var fis []os.FileInfo
-	fis, err = f.Readdir(-1)
-	if err != nil {
-		return
-	}
-	re := regexp.MustCompile(`^([0-9]+)(.*)\.go$`)
-	max := 0
-	for _, fi := range fis {
-		m := re.FindStringSubmatch(fi.Name())
-		if len(m) < 2 {
+	// find new columns
+	for _, model := range models {
+		tableName := model.TableName()
+		if !tableNames.has(tableName) {
 			continue
 		}
-		n, _ := strconv.Atoi(m[1])
-		if n > max {
-			max = n
+		modelColumns := model.Columns()
+		modelDataTypes := model.ColumnDataTypes()
+		for _, modelColumn := range modelColumns {
+			if columns.has(tableName, modelColumn) {
+				continue
+			}
+			up += fmt.Sprintf("\nALTER TABLE %s ADD COLUMN %s %s;\n",
+				tableName, modelColumn, modelDataTypes[modelColumn])
+			down = fmt.Sprintf("\nALTER TABLE %s DROP COLUMN %s;\n",
+				tableName, modelColumn) + down
+			columnsCreated = append(columnsCreated, modelColumn+"_to_"+tableName)
 		}
 	}
-	version := max
-	path = filepath.Join(dir, fmt.Sprintf("%02d_%s.go", version, name))
-	if _, err := os.Stat(path); err != nil {
-		version = max + 1
-		path = filepath.Join(dir, fmt.Sprintf("%02d_%s.go", version, name))
+
+	// remove old tables
+	for _, tableName := range tableNames {
+		var model PsqlModel
+		for _, m := range models {
+			if m.TableName() == tableName {
+				model = m
+				break
+			}
+		}
+		if model != nil {
+			continue
+		}
+		up += "\n" + "DROP TABLE IF EXISTS " + tableName + ";\n"
+		down = "\n" + columns.forTable(tableName).createTable(tableName) + down
+		tablesDropped = append(tablesDropped, tableName)
 	}
-	err = ioutil.WriteFile(path, []byte(fmt.Sprintf(migrationTemplate, version, up, down)), 0644)
-	return
+
+	// remove old columns
+	groups := columns.grouped()
+	for tableName, cols := range groups {
+		var model PsqlModel
+		for _, m := range models {
+			if m.TableName() == tableName {
+				model = m
+				break
+			}
+		}
+		if model == nil {
+			continue
+		}
+		modelColumns := model.Columns()
+		for _, col := range cols {
+			if stringSliceContains(modelColumns, col.ColumnName) {
+				continue
+			}
+			up += "\n" + "ALTER TABLE " + tableName + " DROP COLUMN " + col.ColumnName + ";\n"
+			down = "\n" + "ALTER TABLE " + tableName + " ADD COLUMN " + col.ColumnName + " " + col.dataType() + ";\n" + down
+			columnsDropped = append(columnsDropped, col.ColumnName+"_from_"+tableName)
+		}
+	}
+
+	if len(tablesCreated) > 0 {
+		name = "create_" + strings.Join(tablesCreated, "_")
+	} else if len(tablesDropped) > 0 {
+		name = "drop_" + strings.Join(tablesDropped, "_")
+	} else if len(columnsCreated) > 0 {
+		name = "add_" + strings.Join(columnsCreated, "_")
+	} else if len(columnsDropped) > 0 {
+		name = "remove_" + strings.Join(columnsDropped, "_")
+	}
+	if name == "" {
+		name = "new_migration"
+	}
+
+	var migrations Migrations
+	var maxVer int
+	for _, m := range m.migrations {
+		if m.version > maxVer {
+			maxVer = m.version
+		}
+	}
+	if maxVer == 0 {
+		migrations = append(migrations, Migration{
+			Version: 0,
+			Name:    "migrations",
+		})
+	}
+	migrations = append(migrations, Migration{
+		Version: maxVer + 1,
+		Name:    name,
+		Up:      up,
+		Down:    down,
+	})
+
+	return migrations, nil
 }
 
+func (m Migration) String() string {
+	if m.Version < 1 {
+		return migrationsTemplate
+	}
+	return fmt.Sprintf(migrationTemplate, m.Version, m.Up, m.Down)
+}
+
+func (m Migration) FileName() string {
+	if m.Version < 1 {
+		return fmt.Sprintf("%s.go", m.Name)
+	}
+	return fmt.Sprintf("%02d_%s.go", m.Version, m.Name)
+}
+
+// CanonicalScope returns valid scope name.
 func (m *Migrator) CanonicalScope() string {
 	return strings.Join(regexp.MustCompile("[A-Za-z0-9_-]+").FindStringSubmatch(m.Scope), "")
 }
 
+// SetMigrations imports migrations.
 func (m *Migrator) SetMigrations(migrations interface{}) error {
 	rt := reflect.TypeOf(migrations)
 	if rt.Kind() != reflect.Slice {
@@ -184,6 +281,8 @@ func (m *Migrator) SetMigrations(migrations interface{}) error {
 	return nil
 }
 
+// Versions returns version numbers of migrations that have been run and not
+// yet been run.
 func (m *Migrator) Versions() (migrated, unmigrated []int) {
 	for _, migration := range m.migrations {
 		if m.versionExists(migration.version) {
@@ -195,6 +294,8 @@ func (m *Migrator) Versions() (migrated, unmigrated []int) {
 	return
 }
 
+// Migrate executes the up SQL for all the migrations that have not yet been
+// run.
 func (m *Migrator) Migrate() (err error) {
 	if len(m.migrations) == 0 {
 		m.Logger.Info("nothing to migrate")
@@ -236,6 +337,7 @@ func (m *Migrator) migrate() error {
 	return nil
 }
 
+// Rollback executes the down SQL of last migration.
 func (m *Migrator) Rollback() (err error) {
 	err = m.rollback()
 	if err != nil && (err == m.DB.ErrNoRows() || m.DB.ErrGetCode(err) == "42P01") { // relation not exists
@@ -287,4 +389,130 @@ func (m *Migrator) getLatestVersion() (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(version)
+}
+
+func (m *Migrator) getTableNames() (tableNames, error) {
+	rows, err := m.DB.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names tableNames
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if name == "schema_migrations" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+func (m *Migrator) getColumns() (columns, error) {
+	rows, err := m.DB.Query("SELECT table_name, column_name, data_type, column_default, is_nullable " +
+		"FROM information_schema.columns WHERE table_schema = 'public' " +
+		"ORDER BY table_name, ordinal_position")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cols columns
+	for rows.Next() {
+		var col column
+		if err := rows.Scan(
+			&col.TableName, &col.ColumnName,
+			&col.DataType, &col.ColumnDefault,
+			&col.IsNullable,
+		); err != nil {
+			return nil, err
+		}
+		cols = append(cols, col)
+	}
+	return cols, nil
+}
+
+type (
+	tableNames []string
+
+	columns []column
+
+	column struct {
+		TableName     string
+		ColumnName    string
+		DataType      string
+		ColumnDefault *string
+		IsNullable    string
+	}
+)
+
+func (names tableNames) has(tableName string) bool {
+	for _, name := range names {
+		if name == tableName {
+			return true
+		}
+	}
+	return false
+}
+
+func (columns columns) has(tableName, columnName string) bool {
+	for _, column := range columns {
+		if column.TableName == tableName && column.ColumnName == columnName {
+			return true
+		}
+	}
+	return false
+}
+
+func (columns columns) forTable(tableName string) (filtered columns) {
+	for _, column := range columns {
+		if column.TableName == tableName {
+			filtered = append(filtered, column)
+		}
+	}
+	return
+}
+
+func (columns columns) createTable(tableName string) string {
+	if len(columns) == 0 {
+		return ""
+	}
+	var sql []string
+	for _, c := range columns {
+		sql = append(sql, "\t"+c.ColumnName+" "+c.dataType())
+	}
+	return "CREATE TABLE " + tableName + " (\n" + strings.Join(sql, ",\n") + "\n);\n"
+}
+
+func (cs columns) grouped() (groups map[string]columns) {
+	groups = map[string]columns{}
+	for _, c := range cs {
+		groups[c.TableName] = append(groups[c.TableName], c)
+	}
+	return
+}
+
+func (c column) dataType() string {
+	dataType := c.DataType
+	if c.ColumnDefault != nil {
+		dataType += " DEFAULT " + *c.ColumnDefault
+	}
+	if c.IsNullable == "NO" {
+		dataType += " NOT NULL"
+	}
+	if strings.Contains(dataType, "integer DEFAULT nextval") {
+		dataType = "SERIAL PRIMARY KEY"
+	}
+	return dataType
+}
+
+func stringSliceContains(slice []string, str string) bool {
+	for _, item := range slice {
+		if item == str {
+			return true
+		}
+	}
+	return false
 }
