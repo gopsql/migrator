@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/gopsql/db"
@@ -16,7 +15,7 @@ const (
 	sqlCreateSchemaMigrations = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
 	scope character varying NOT NULL,
-	version character varying NOT NULL
+	version integer NOT NULL
 );
 `
 
@@ -309,9 +308,19 @@ func (m *Migrator) Migrate() (err error) {
 }
 
 func (m *Migrator) migrate() error {
-	_, err := m.DB.Exec(sqlCreateSchemaMigrations)
-	if err != nil {
-		return err
+	var versionType string
+	err := m.DB.QueryRow("SELECT data_type FROM information_schema.columns " +
+		"WHERE table_name = 'schema_migrations' AND column_name = 'version'").Scan(&versionType)
+	if err != nil && err == m.DB.ErrNoRows() {
+		_, err = m.DB.Exec(sqlCreateSchemaMigrations)
+		if err != nil {
+			return err
+		}
+	} else if versionType != "integer" {
+		_, err = m.DB.Exec("ALTER TABLE schema_migrations ALTER COLUMN version TYPE integer USING version::integer")
+		if err != nil {
+			return err
+		}
 	}
 	scope := m.CanonicalScope()
 	migrated := false
@@ -360,7 +369,7 @@ func (m *Migrator) rollback() error {
 		}
 		m.Logger.Info("version", migration.version, "rollbacking")
 		sqlStr := migration.down
-		sqlStr += "\n" + fmt.Sprintf("DELETE FROM schema_migrations WHERE scope = '%s' AND version = '%d';", scope, version)
+		sqlStr += "\n" + fmt.Sprintf("DELETE FROM schema_migrations WHERE scope = '%s' AND version = %d;", scope, version)
 		m.Logger.Debug("running sql:", sqlStr)
 		_, err := m.DB.Exec(sqlStr)
 		if err == nil {
@@ -374,7 +383,7 @@ func (m *Migrator) rollback() error {
 func (m *Migrator) versionExists(version int) bool {
 	scope := m.CanonicalScope()
 	var one int
-	err := m.DB.QueryRow("SELECT 1 AS one FROM schema_migrations WHERE scope = $1 AND version = $2 LIMIT 1", scope, strconv.Itoa(version)).Scan(&one)
+	err := m.DB.QueryRow("SELECT 1 AS one FROM schema_migrations WHERE scope = $1 AND version = $2 LIMIT 1", scope, version).Scan(&one)
 	if err != nil && err != m.DB.ErrNoRows() {
 		m.Logger.Debug("check version:", err)
 	}
@@ -383,12 +392,12 @@ func (m *Migrator) versionExists(version int) bool {
 
 func (m *Migrator) getLatestVersion() (int, error) {
 	scope := m.CanonicalScope()
-	var version string
+	var version int
 	err := m.DB.QueryRow("SELECT version FROM schema_migrations WHERE scope = $1 ORDER BY version DESC LIMIT 1", scope).Scan(&version)
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(version)
+	return version, nil
 }
 
 func (m *Migrator) getTableNames() (tableNames, error) {
