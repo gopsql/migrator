@@ -1,4 +1,4 @@
-github.com/gopsql/db v1.1.0 h1:NWV/GmbTpxbMlZ/jJM9dezWHP78mx1YEpm75OEr7CL0=
-github.com/gopsql/db v1.1.0/go.mod h1:plazrQDxoOfbv749q6AqZyR0wtPak19s4uw8J8pnMYA=
+github.com/gopsql/db v1.2.0 h1:aDcWmUh4qaHm+VByfbu4CPqYZ2vlFWqr0nndiHXc24g=
+github.com/gopsql/db v1.2.0/go.mod h1:plazrQDxoOfbv749q6AqZyR0wtPak19s4uw8J8pnMYA=
 github.com/gopsql/logger v1.0.0 h1:21Sv0ut7G5Jl3tNOtYe5dfULZ6pnMbT/tDRDjYR3xC4=
 github.com/gopsql/logger v1.0.0/go.mod h1:GLePobhbDvK9bVbciLfapWQh0g52Ph7n1NfOCWK8zoc=
