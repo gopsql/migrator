@@ -253,6 +253,10 @@ func (m *Migrator) CanonicalScope() string {
 
 // SetMigrations imports migrations.
 func (m *Migrator) SetMigrations(migrations interface{}) error {
+	if migrations == nil {
+		m.migrations = nil
+		return nil
+	}
 	if migs, ok := migrations.(Migrations); ok {
 		m.migrations = nil
 		for _, mig := range migs {
@@ -363,6 +367,9 @@ func (m *Migrator) migrate() error {
 	scope := m.CanonicalScope()
 	migrated := false
 	for _, migration := range m.migrations {
+		if migration.version < 1 {
+			continue
+		}
 		if m.versionExists(migration.version) {
 			m.Logger.Debug("version", migration.version, "already migrated")
 			continue
