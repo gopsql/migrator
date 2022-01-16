@@ -1,6 +1,7 @@
 package migrator
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -56,10 +57,9 @@ var (
 
 type (
 	Migrator struct {
-		Scope  string
-		DB     db.DB
-		Logger logger.Logger
-
+		Scope      string
+		DB         db.DB
+		Logger     logger.Logger
 		migrations []migration
 	}
 
@@ -308,18 +308,28 @@ func (m *Migrator) Migrate() (err error) {
 }
 
 func (m *Migrator) migrate() error {
+	var sql string
+	if m.DB.DriverName() == "sqlite" {
+		sql = "SELECT type FROM pragma_table_info('schema_migrations') WHERE name = 'version'"
+	} else {
+		sql = "SELECT data_type FROM information_schema.columns " +
+			"WHERE table_name = 'schema_migrations' AND column_name = 'version'"
+	}
 	var versionType string
-	err := m.DB.QueryRow("SELECT data_type FROM information_schema.columns " +
-		"WHERE table_name = 'schema_migrations' AND column_name = 'version'").Scan(&versionType)
+	err := m.DB.QueryRow(sql).Scan(&versionType)
 	if err != nil && err == m.DB.ErrNoRows() {
 		_, err = m.DB.Exec(sqlCreateSchemaMigrations)
 		if err != nil {
 			return err
 		}
 	} else if versionType != "integer" {
-		_, err = m.DB.Exec("ALTER TABLE schema_migrations ALTER COLUMN version TYPE integer USING version::integer")
-		if err != nil {
-			return err
+		if m.DB.DriverName() == "sqlite" {
+			// no need to change column type
+		} else {
+			_, err = m.DB.Exec("ALTER TABLE schema_migrations ALTER COLUMN version TYPE integer USING version::integer")
+			if err != nil {
+				return err
+			}
 		}
 	}
 	scope := m.CanonicalScope()
@@ -332,9 +342,7 @@ func (m *Migrator) migrate() error {
 		m.Logger.Info("version", migration.version, "migrating")
 		sqlStr := migration.up
 		sqlStr += "\n" + fmt.Sprintf("INSERT INTO schema_migrations (scope, version) VALUES ('%s', %d);", scope, migration.version)
-		m.Logger.Debug("running sql:", sqlStr)
-		_, err := m.DB.Exec(sqlStr)
-		if err != nil {
+		if err := m.execInTransaction(sqlStr); err != nil {
 			return err
 		}
 		m.Logger.Info("version", migration.version, "migrated")
@@ -380,6 +388,36 @@ func (m *Migrator) rollback() error {
 	return nil
 }
 
+func (m *Migrator) execInTransaction(sql string) (err error) {
+	ctx := context.Background()
+	m.Logger.Debug("BEGIN")
+	var tx db.Tx
+	tx, err = m.DB.BeginTx(ctx, "", false)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			m.Logger.Debug("ROLLBACK")
+			tx.Rollback(ctx)
+			if rerr, ok := r.(error); ok {
+				err = rerr
+			} else {
+				err = errors.New(fmt.Sprint(r))
+			}
+		} else if err != nil {
+			m.Logger.Debug("ROLLBACK")
+			tx.Rollback(ctx)
+		} else {
+			m.Logger.Debug("COMMIT")
+			err = tx.Commit(ctx)
+		}
+	}()
+	m.Logger.Debug(sql)
+	_, err = tx.ExecContext(ctx, sql)
+	return
+}
+
 func (m *Migrator) versionExists(version int) bool {
 	scope := m.CanonicalScope()
 	var one int
@@ -401,7 +439,13 @@ func (m *Migrator) getLatestVersion() (int, error) {
 }
 
 func (m *Migrator) getTableNames() (tableNames, error) {
-	rows, err := m.DB.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+	var sql string
+	if m.DB.DriverName() == "sqlite" {
+		sql = "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+	} else {
+		sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+	}
+	rows, err := m.DB.Query(sql)
 	if err != nil {
 		return nil, err
 	}
@@ -421,9 +465,18 @@ func (m *Migrator) getTableNames() (tableNames, error) {
 }
 
 func (m *Migrator) getColumns() (columns, error) {
-	rows, err := m.DB.Query("SELECT table_name, column_name, data_type, column_default, is_nullable " +
-		"FROM information_schema.columns WHERE table_schema = 'public' " +
-		"ORDER BY table_name, ordinal_position")
+	var sql string
+	if m.DB.DriverName() == "sqlite" {
+		sql = "SELECT ss.name, p.name, p.type, p.dflt_value, p.[notnull] = 0 " +
+			"FROM sqlite_schema ss LEFT JOIN pragma_table_info(ss.name) p ON ss.name <> p.name " +
+			"WHERE ss.type = 'table' AND ss.name NOT LIKE 'sqlite_%' " +
+			"ORDER BY ss.name, p.cid"
+	} else {
+		sql = "SELECT table_name, column_name, data_type, column_default, is_nullable " +
+			"FROM information_schema.columns WHERE table_schema = 'public' " +
+			"ORDER BY table_name, ordinal_position"
+	}
+	rows, err := m.DB.Query(sql)
 	if err != nil {
 		return nil, err
 	}
