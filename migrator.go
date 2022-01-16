@@ -253,31 +253,59 @@ func (m *Migrator) CanonicalScope() string {
 
 // SetMigrations imports migrations.
 func (m *Migrator) SetMigrations(migrations interface{}) error {
+	if migs, ok := migrations.(Migrations); ok {
+		m.migrations = nil
+		for _, mig := range migs {
+			m.migrations = append(m.migrations, migration{
+				version: mig.Version,
+				up:      mig.Up,
+				down:    mig.Down,
+			})
+		}
+		return nil
+	}
 	rt := reflect.TypeOf(migrations)
 	if rt.Kind() != reflect.Slice {
 		return ErrMigrationsBadType
 	}
 	rv := reflect.ValueOf(migrations)
-	for i := 0; i < rv.Len(); i++ {
-		v := rv.Index(i)
-		if v.Kind() != reflect.Struct {
-			return ErrMigrationsBadType
-		}
-		if v.FieldByName("version").Kind() != reflect.Int ||
-			v.FieldByName("up").Kind() != reflect.String ||
-			v.FieldByName("down").Kind() != reflect.String {
-			return ErrMigrationsBadType
-		}
+	version, up, down := getFieldNames(rv)
+	if version == "" || up == "" || down == "" {
+		return ErrMigrationsBadType
 	}
+	m.migrations = nil
 	for i := 0; i < rv.Len(); i++ {
 		v := rv.Index(i)
 		m.migrations = append(m.migrations, migration{
-			version: int(v.FieldByName("version").Int()),
-			up:      v.FieldByName("up").String(),
-			down:    v.FieldByName("down").String(),
+			version: int(v.FieldByName(version).Int()),
+			up:      v.FieldByName(up).String(),
+			down:    v.FieldByName(down).String(),
 		})
 	}
 	return nil
+}
+
+func getFieldNames(rv reflect.Value) (version, up, down string) {
+	rt := rv.Type()
+	if rt.Kind() == reflect.Slice {
+		rt = rt.Elem()
+	}
+	if rt.Kind() != reflect.Struct {
+		return
+	}
+	for i := 0; i < rt.NumField(); i++ {
+		field := rt.Field(i)
+		name := strings.ToLower(field.Name)
+		kind := field.Type.Kind()
+		if name == "version" && kind == reflect.Int {
+			version = field.Name
+		} else if name == "up" && kind == reflect.String {
+			up = field.Name
+		} else if name == "down" && kind == reflect.String {
+			down = field.Name
+		}
+	}
+	return
 }
 
 // Versions returns version numbers of migrations that have been run and not
