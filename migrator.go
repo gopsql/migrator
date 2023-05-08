@@ -159,7 +159,7 @@ func (m *Migrator) NewMigration(models ...PsqlModel) (Migrations, error) {
 	for _, tableName := range tableNames {
 		var model PsqlModel
 		for _, m := range models {
-			if m.TableName() == tableName {
+			if identifierEqual(m.TableName(), tableName) {
 				model = m
 				break
 			}
@@ -177,7 +177,7 @@ func (m *Migrator) NewMigration(models ...PsqlModel) (Migrations, error) {
 	for tableName, cols := range groups {
 		var model PsqlModel
 		for _, m := range models {
-			if m.TableName() == tableName {
+			if identifierEqual(m.TableName(), tableName) {
 				model = m
 				break
 			}
@@ -547,7 +547,7 @@ type (
 
 func (names tableNames) has(tableName string) bool {
 	for _, name := range names {
-		if name == tableName {
+		if identifierEqual(name, tableName) {
 			return true
 		}
 	}
@@ -556,7 +556,7 @@ func (names tableNames) has(tableName string) bool {
 
 func (columns columns) has(tableName, columnName string) bool {
 	for _, column := range columns {
-		if column.TableName == tableName && column.ColumnName == columnName {
+		if identifierEqual(column.TableName, tableName) && identifierEqual(column.ColumnName, columnName) {
 			return true
 		}
 	}
@@ -605,9 +605,13 @@ func (c column) dataType() string {
 	return dataType
 }
 
+func identifierEqual(a, b string) bool {
+	return strings.ToLower(a) == strings.ToLower(b)
+}
+
 func stringSliceContains(slice []string, str string) bool {
 	for _, item := range slice {
-		if item == str {
+		if identifierEqual(item, str) {
 			return true
 		}
 	}
