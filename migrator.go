@@ -232,18 +232,28 @@ func (m *Migrator) NewMigration(models ...PsqlModel) (Migrations, error) {
 	return migrations, nil
 }
 
-func (m Migration) String() string {
-	if m.Version < 1 {
+func (m Migration) String(optionalDelta ...int) string {
+	delta := 0
+	if len(optionalDelta) > 0 {
+		delta = optionalDelta[0]
+	}
+	ver := m.Version + delta
+	if ver < 1 {
 		return migrationsTemplate
 	}
-	return fmt.Sprintf(migrationTemplate, m.Version, m.Up, m.Down)
+	return fmt.Sprintf(migrationTemplate, ver, m.Up, m.Down)
 }
 
-func (m Migration) FileName() string {
-	if m.Version < 1 {
+func (m Migration) FileName(optionalDelta ...int) string {
+	delta := 0
+	if len(optionalDelta) > 0 {
+		delta = optionalDelta[0]
+	}
+	ver := m.Version + delta
+	if ver < 1 {
 		return fmt.Sprintf("%s.go", m.Name)
 	}
-	return fmt.Sprintf("%02d_%s.go", m.Version, m.Name)
+	return fmt.Sprintf("%02d_%s.go", ver, m.Name)
 }
 
 // CanonicalScope returns valid scope name.
