@@ -147,8 +147,12 @@ func (m *Migrator) NewMigration(models ...PsqlModel) (Migrations, error) {
 			if columns.has(tableName, modelColumn) {
 				continue
 			}
+			dataType, ok := modelDataTypes[modelColumn]
+			if !ok {
+				continue
+			}
 			up += fmt.Sprintf("\nALTER TABLE %s ADD COLUMN %s %s;\n",
-				tableName, modelColumn, modelDataTypes[modelColumn])
+				tableName, modelColumn, dataType)
 			down = fmt.Sprintf("\nALTER TABLE %s DROP COLUMN %s;\n",
 				tableName, modelColumn) + down
 			columnsCreated = append(columnsCreated, modelColumn+"_to_"+tableName)
